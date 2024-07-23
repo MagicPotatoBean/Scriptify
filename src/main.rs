@@ -2,6 +2,8 @@
 //! ```cargo
 //! [dependencies]
 //! clap = {version = "4.5.8", features = ["derive"]}
+//! anyhow = "1.0.86"
+//! color-eyre = "0.6.3"
 //! ```
 
 use std::{fs::File, io::Read, path::PathBuf};
@@ -15,22 +17,19 @@ use clap::{command, Parser};
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    #[arg(
-        short,
-        long,
-        verbatim_doc_comment,
-        value_parser,
-        num_args = 1,
-        required = true
-    )]
+    /// The root directory of the program being script-ified (the path containing Cargo.toml and src/)
+    #[arg(short, long, value_parser, required = true)]
     root_dir: PathBuf,
+    /// The path of the file to write the script to
+    #[arg(short, long, value_parser, required = true)]
+    out_path: PathBuf,
 }
 type Result<T> = anyhow::Result<T>;
 fn main() -> Result<()> {
     let args = Args::parse();
     let Ok(root_dir) = std::env::current_dir()
         .expect("Failed to get current directory")
-        .join(args.root_dir)
+        .join(&args.root_dir)
         .canonicalize()
     else {
         return Err(anyhow!("No such file or directory".to_string()));
@@ -39,17 +38,24 @@ fn main() -> Result<()> {
         return Err(anyhow!("Specified path is not a directory"));
     }
     println!("Scriptifying {}/", root_dir.display());
-    println!("manifest:\n");
-    println!(
-        "{}",
-        generate_manifest(
-            std::fs::OpenOptions::new()
-                .read(true)
-                .open(root_dir.join("Cargo.toml"))?
-        )?
-    );
-
-    Ok(())
+    let mut data = generate_manifest(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .open(root_dir.join("Cargo.toml"))?,
+    )?;
+    data.push_str(&join_src_tree(SrcTree::from_path(
+        args.root_dir.join(PathBuf::from("src/")),
+    )?)?);
+    let res = Ok(std::fs::write(&args.out_path, data)?);
+    if res.is_ok() {
+        println!(
+            "Success! You may have to run\n $ chmod +x {0}\nin order to make the script executable. Then just call\n $ ./{0}\nTo execute it.",
+            args.out_path.display()
+        );
+        Ok(())
+    } else {
+        res
+    }
 }
 fn generate_manifest(mut cargo_toml: File) -> Result<String> {
     let mut manifest = "#!/usr/bin/env nix-shell\n//! ```cargo\n".to_string();
@@ -66,9 +72,16 @@ fn generate_manifest(mut cargo_toml: File) -> Result<String> {
     */
     Ok(manifest)
 }
+#[derive(Debug)]
 enum SrcTree {
-    File(String),
-    Directory(Vec<SrcTree>),
+    File {
+        name: String,
+        data: String,
+    },
+    Directory {
+        name: String,
+        children: Vec<SrcTree>,
+    },
 }
 impl SrcTree {
     fn from_path(path: PathBuf) -> Result<Self> {
@@ -76,16 +89,78 @@ impl SrcTree {
             let mut contents = String::default();
             std::fs::OpenOptions::new()
                 .read(true)
-                .open(path)?
+                .open(&path)?
                 .read_to_string(&mut contents)?;
-            return Ok(SrcTree::File(contents));
+            return Ok(SrcTree::File {
+                name: path
+                    .file_name()
+                    .ok_or(anyhow!("Path wasnt canonicalized"))?
+                    .to_string_lossy()
+                    .to_string(),
+                data: clean_code(contents),
+            });
         } else {
             let mut contents = Vec::new();
-            for entry in std::fs::read_dir(path)? {
+            for entry in std::fs::read_dir(&path)? {
                 contents.push(SrcTree::from_path(entry?.path())?);
             }
-            return Ok(SrcTree::Directory(contents));
+            return Ok(SrcTree::Directory {
+                name: path
+                    .file_name()
+                    .ok_or(anyhow!("Path wasnt canonicalized"))?
+                    .to_string_lossy()
+                    .to_string(),
+                children: contents,
+            });
         }
     }
 }
-fn join_src_tree(tree: SrcTree) -> Result<String> {}
+fn clean_code(code: String) -> String {
+    let mut code: Vec<_> = code.lines().collect();
+    code.retain(|line| !(line.starts_with("mod ") && line.ends_with(";")));
+    code.join("\n")
+}
+fn join_src_tree(tree: SrcTree) -> Result<String> {
+    match tree {
+        SrcTree::File { name, data } => {
+            let mut buffer;
+            let should_close;
+            if name == "mod.rs" || name == "main.rs" {
+                buffer = "".to_string();
+                should_close = false;
+            } else {
+                should_close = true;
+                let name_chars: Vec<char> = name.chars().collect();
+                buffer = format!(
+                    "mod {} {{\n",
+                    &name_chars[0..(name_chars.len() - 3)]
+                        .iter()
+                        .collect::<String>()
+                );
+            }
+            buffer.push_str(&data);
+            if should_close {
+                buffer.push_str("\n}");
+            }
+            return Ok(buffer);
+        }
+        SrcTree::Directory { name, children } => {
+            if name == "src" {
+                let mut buffer = String::default();
+                for child in children {
+                    buffer.push_str(&join_src_tree(child)?);
+                    buffer.push('\n');
+                }
+                return Ok(buffer);
+            } else {
+                let mut buffer = format!("mod {name} {{\n");
+                for child in children {
+                    buffer.push_str(&join_src_tree(child)?);
+                    buffer.push('\n');
+                }
+                buffer.push_str("\n}\n");
+                return Ok(buffer);
+            }
+        }
+    }
+}
