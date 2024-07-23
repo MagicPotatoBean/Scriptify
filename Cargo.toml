@@ -1,5 +1,5 @@
 [package]
-name = "scriptifier"
+name = "scriptify"
 version = "0.1.0"
 edition = "2021"
 
