@@ -6,13 +6,13 @@
 //! color-eyre = "0.6.3"
 //! ```
 
+/*
+#!nix-shell -i rust-script -p rustc -p rust-script -p cargo
+*/
 use std::{fs::File, io::Read, path::PathBuf};
 
 use anyhow::anyhow;
 use clap::{command, Parser};
-/*
-#!nix-shell -i rust-script -p rustc -p rust-script -p cargo
-*/
 /// A rust-script to convert rust files into rust-scripts
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -43,9 +43,11 @@ pub fn main() -> Result<()> {
             .read(true)
             .open(root_dir.join("Cargo.toml"))?,
     )?;
+    println!("Generated manifest");
     data.push_str(&join_src_tree(SrcTree::from_path(
         args.root_dir.join(PathBuf::from("src/")),
     )?)?);
+    println!("Merged source files");
     let res = Ok(std::fs::write(&args.out_path, data)?);
     if res.is_ok() {
         println!(
@@ -54,6 +56,7 @@ pub fn main() -> Result<()> {
         );
         Ok(())
     } else {
+        println!("Failed to write final file out.");
         res
     }
 }
@@ -118,6 +121,7 @@ impl SrcTree {
 fn clean_code(code: String) -> String {
     let mut code: Vec<_> = code.lines().collect();
     code.retain(|line| !(line.starts_with("mod ") && line.ends_with(";")));
+    code.retain(|line| !(line.starts_with("pub mod ") && line.ends_with(";")));
     code.join("\n")
 }
 fn join_src_tree(tree: SrcTree) -> Result<String> {
